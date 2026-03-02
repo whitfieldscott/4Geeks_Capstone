@@ -58,27 +58,98 @@ model, feature_list = load_model()
 # CREATE TABS
 # ---------------------------------------------------------
 tab1, tab2, tab3 = st.tabs(
-    ["System Overview", "School Deep Dive", "Model Evaluation"]
+    ["Project Overview", "School Deep Dive", "Model Evaluation"]
 )
 
 # =========================================================
-# TAB 1 — SYSTEM OVERVIEW
+# TAB 1 — PROJECT OVERVIEW
 # =========================================================
 with tab1:
 
-    st.header("System Overview")
+    # -----------------------------------------------------
+    # TITLE + POSITIONING
+    # -----------------------------------------------------
+    st.header("School Strain Monitoring Platform")
+
+    st.markdown("""
+    ### Research Question
+
+    Can socioeconomic and demographic characteristics be used to predict  
+    which schools are at risk for elevated student–teacher structural strain?
+
+    ---
+    """)
+
+    st.markdown("""
+    ### Project Framing
+
+    A data-driven early warning system designed to identify schools  
+    at elevated risk of structural strain before operational pressures escalate.
+    """)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+
+    # =====================================================
+    # BUSINESS PROBLEM
+    # =====================================================
+    st.subheader("Business Problem")
+
+    st.markdown("""
+    • Structural strain impacts instructional quality and staffing balance  
+
+    • Overcrowding pressures are often addressed reactively rather than proactively  
+
+    • District leadership lacks a consistent early-warning framework  
+
+    • Resource allocation decisions require prioritization across schools  
+    """)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+
+    # =====================================================
+    # DATA COLLECTION & SCOPE
+    # =====================================================
+    st.subheader("Data Collection & Scope")
+
+    st.markdown("""
+    • **Data Source:** NCES school-level + socioeconomic census indicators  
+
+    • **Time Span:** 2017–2022  
+
+    • **Target Variable:** High Strain (binary classification)  
+      Defined using elevated student–teacher ratio thresholds  
+
+    • **Modeling Objective:** Predict structural strain risk using  
+      socioeconomic and demographic indicators  
+
+    • **Models Used:** Random Forest & XGBoost  
+
+    • **Evaluation Metrics:** ROC-AUC and Precision-Recall  
+
+    ⚠️ This project evaluates predictive capability — not causal proof.
+    """)
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+
+    # =====================================================
+    # KEY SYSTEM-WIDE FINDINGS
+    # =====================================================
+    st.subheader("Key Findings")
 
     strain_rate = df["high_strain"].mean()
-    st.metric("Overall High Strain Rate", f"{strain_rate:.2%}")
+    st.metric("Overall High Strain Rate Across Schools", f"{strain_rate:.2%}")
 
     X_all = df[feature_list]
     all_probs = model.predict_proba(X_all)[:, 1]
 
     col1, col2 = st.columns(2)
 
-    # -------- Risk Distribution --------
+    # ---------------- Risk Distribution ----------------
     with col1:
-        st.subheader("Risk Score Distribution")
+        st.markdown("**System-Wide Risk Distribution**")
 
         fig, ax = plt.subplots(figsize=(5, 3), dpi=100)
         ax.hist(all_probs, bins=30)
@@ -89,14 +160,13 @@ with tab1:
         st.pyplot(fig)
 
         st.markdown("""
-        **Risk Score Distribution:**  
-        Most schools cluster at low predicted strain probabilities.  
-        A smaller right tail represents higher-risk schools.
+        Most schools cluster at lower predicted risk levels,  
+        while a smaller segment consistently shows elevated strain probability.
         """)
 
-    # -------- Feature Importance --------
+    # ---------------- Feature Importance ----------------
     with col2:
-        st.subheader("Top Global Drivers")
+        st.markdown("**Top Predictive Drivers**")
 
         importances = model.feature_importances_
 
@@ -119,10 +189,32 @@ with tab1:
         st.pyplot(fig2)
 
         st.markdown("""
-        **Top Global Drivers:**  
-        Impurity-based Random Forest importance (Gini).  
-        Higher bars indicate variables most used in tree splits.
+        Both Random Forest and XGBoost independently surfaced similar drivers,  
+        strengthening confidence in the stability of these findings.
         """)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+
+    # =====================================================
+    # INTERPRETATION & CONCLUSION
+    # =====================================================
+    st.subheader("Interpretation & Conclusion")
+
+    st.markdown("""
+    • Structural strain is not random — it follows identifiable patterns  
+
+    • Grade composition and socioeconomic concentration consistently  
+      emerge as strong indicators  
+
+    • Model agreement increases confidence in prioritization decisions  
+
+    • This tool should support leadership — not replace local expertise  
+
+    **Conclusion:**  
+    Predictive modeling enables earlier identification, smarter prioritization,  
+    and more proactive resource planning.
+    """)
 
 # =========================================================
 # TAB 2 — SCHOOL DEEP DIVE (POLISHED + EXPLAINABLE)
