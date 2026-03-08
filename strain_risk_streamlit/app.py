@@ -43,23 +43,49 @@ st.title("School Strain Monitoring Platform")
 # ---------------------------------------------------------
 @st.cache_data
 def load_data():
-    return pd.read_csv("rf_production_dataset.csv")
-
-@st.cache_resource
-def load_model():
-    model = joblib.load("rf_model.pkl")
-    feature_list = joblib.load("rf_feature_list.pkl")
-    return model, feature_list
+    return pd.read_csv("xgb_production_dataset.csv")
 
 df = load_data()
-model, feature_list = load_model()
+
+@st.cache_resource
+def load_model_and_features(dataframe: pd.DataFrame):
+    """
+    Load XGBoost model and derive:
+      - feature_list from dataframe (drop ID/target columns)
+      - feature_importance_df from model.get_booster().get_score('gain')
+        aligned to feature_list so it always matches the dataset columns.
+    """
+    model = joblib.load("xgb_model.pkl")
+
+    # Build feature list from the dataset (most reliable)
+    exclude_cols = {"NCESSCH", "SCH_NAME", "SURVYEAR", "high_strain"}
+    feature_list = [c for c in dataframe.columns if c not in exclude_cols]
+
+    # Compute feature importance from model (avoid loading xgb_feature_importance.pkl)
+    booster = model.get_booster()
+    gain_scores = booster.get_score(importance_type="gain")  # dict: feature -> gain
+
+    # Align importance to dataset features (missing features get 0)
+    feature_importance_df = (
+        pd.DataFrame({"feature": feature_list})
+        .assign(total_gain=lambda d: d["feature"].map(gain_scores).fillna(0.0))
+        .sort_values("total_gain", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    total = feature_importance_df["total_gain"].sum()
+    feature_importance_df["pct_of_total"] = (
+        feature_importance_df["total_gain"] / total if total > 0 else 0.0
+    )
+
+    return model, feature_list, feature_importance_df
+
+model, feature_list, feature_importance_df = load_model_and_features(df)
 
 # ---------------------------------------------------------
-# CREATE TABS
+# CREATE TABS (TAB 1 + TAB 2 ONLY)
 # ---------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(
-    ["Project Overview", "School Deep Dive", "Model Evaluation"]
-)
+tab1, tab2 = st.tabs(["Project Overview", "School Deep Dive"])
 
 # =========================================================
 # TAB 1 — PROJECT OVERVIEW
@@ -89,7 +115,6 @@ with tab1:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-
     # =====================================================
     # BUSINESS PROBLEM
     # =====================================================
@@ -106,7 +131,6 @@ with tab1:
     """)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
 
     # =====================================================
     # DATA COLLECTION & SCOPE
@@ -132,7 +156,6 @@ with tab1:
     """)
 
     st.markdown("<br><br>", unsafe_allow_html=True)
-
 
     # =====================================================
     # KEY SYSTEM-WIDE FINDINGS
@@ -168,19 +191,10 @@ with tab1:
     with col2:
         st.markdown("**Top Predictive Drivers**")
 
-        importances = model.feature_importances_
-
-        feature_importance = (
-            pd.DataFrame({
-                "feature": feature_list,
-                "importance": importances
-            })
-            .sort_values("importance", ascending=False)
-            .head(15)
-        )
+        top15 = feature_importance_df.head(15)
 
         fig2, ax2 = plt.subplots(figsize=(5, 3), dpi=100)
-        ax2.barh(feature_importance["feature"], feature_importance["importance"])
+        ax2.barh(top15["feature"], top15["pct_of_total"])
         ax2.invert_yaxis()
         ax2.set_xlabel("Importance", fontsize=9)
         ax2.set_ylabel("")
@@ -194,7 +208,6 @@ with tab1:
         """)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
 
     # =====================================================
     # INTERPRETATION & CONCLUSION
@@ -217,7 +230,7 @@ with tab1:
     """)
 
 # =========================================================
-# TAB 2 — SCHOOL DEEP DIVE (POLISHED + EXPLAINABLE)
+# TAB 2 — SCHOOL DEEP DIVE
 # =========================================================
 with tab2:
 
@@ -235,20 +248,19 @@ with tab2:
     school_all_years = df[df["SCH_NAME"] == selected_school].copy()
 
     # -----------------------------------------------------
-    # HELPER FUNCTION — FORMAT TABLE FOR DISPLAY
+    # HELPER FUNCTION — FORMAT TABLE
     # -----------------------------------------------------
     def format_display_table(dataframe):
         display_df = dataframe.copy()
 
         for col in display_df.columns:
             if display_df[col].dtype != "object":
+
                 max_val = display_df[col].max()
 
-                # Convert proportions (0–1 scale) into percentages
                 if max_val <= 1 and col != "high_strain":
                     display_df[col] = (display_df[col] * 100).round(2)
 
-                # Round regular percentage values
                 elif max_val > 1:
                     display_df[col] = display_df[col].round(2)
 
@@ -270,8 +282,10 @@ with tab2:
 
         # ---------------- Risk Assessment ----------------
         X_school = school_one_year[feature_list]
+
         predicted_prob = float(model.predict_proba(X_school)[:, 1][0])
         predicted_label = int(predicted_prob >= 0.25)
+
         actual_label = int(school_one_year["high_strain"].values[0])
 
         st.subheader("Risk Assessment")
@@ -304,21 +318,22 @@ with tab2:
         st.subheader("Multi-Year School Snapshot")
         st.dataframe(school_all_years.sort_values("SURVYEAR"))
 
-        # Sort properly
         school_trend = school_all_years.sort_values("SURVYEAR")
+
         X_trend = school_trend[feature_list]
         y_probs = model.predict_proba(X_trend)[:, 1]
 
-        years = school_trend["SURVYEAR"].values
+        years_arr = school_trend["SURVYEAR"].values
 
         # ===============================
-        # MULTI-YEAR RISK ASSESSMENT
+        # MULTI-YEAR METRICS
         # ===============================
-
         latest_prob = y_probs[-1]
+
         peak_index = np.argmax(y_probs)
-        peak_year = years[peak_index]
+        peak_year = years_arr[peak_index]
         peak_prob = y_probs[peak_index]
+
         avg_prob = np.mean(y_probs)
 
         threshold = 0.25
@@ -345,216 +360,133 @@ with tab2:
             st.info("Mixed performance across years.")
 
         # ===============================
-        # TRAJECTORY CHART (Controlled Size)
+        # CHART + EXECUTIVE SUMMARY
         # ===============================
+        col_chart, col_summary = st.columns([1.2, 1])
 
-        st.subheader("Predicted Risk Trajectory")
+        # -------- Chart --------
+        with col_chart:
 
-        fig_trend, ax_trend = plt.subplots(figsize=(4, 2.5), dpi=100)
+            st.subheader("Predicted Risk Trajectory")
 
-        ax_trend.plot(years, y_probs, marker="o")
-        ax_trend.axhline(threshold, linestyle="--")
+            fig_trend, ax_trend = plt.subplots(figsize=(4, 2.5), dpi=100)
 
-        ax_trend.set_xlabel("Year", fontsize=8)
-        ax_trend.set_ylabel("Predicted Risk", fontsize=8)
-        ax_trend.tick_params(labelsize=8)
+            ax_trend.plot(years_arr, y_probs, marker="o")
+            ax_trend.axhline(threshold, linestyle="--")
 
-        plt.tight_layout()
+            ax_trend.set_xlabel("Year", fontsize=8)
+            ax_trend.set_ylabel("Predicted Risk", fontsize=8)
 
-        # IMPORTANT: prevent Streamlit stretching
-        st.pyplot(fig_trend, use_container_width=False)
+            ax_trend.tick_params(labelsize=8)
 
-        st.markdown(
-            """
-            Shows predicted strain probability over time.
-            Dashed line represents the 25% classification threshold.
-            """
-        )
+            plt.tight_layout()
 
-        # ===============================
-        # AUTOMATED TREND REPORT
-        # ===============================
+            st.pyplot(fig_trend, use_container_width=False)
 
-        first_year = years[0]
-        last_year = years[-1]
+            st.caption("Dashed line represents the 25% strain classification threshold.")
 
-        first_prob = y_probs[0]
-        last_prob = y_probs[-1]
+        # -------- Executive Summary --------
+        with col_summary:
 
-        peak_index = np.argmax(y_probs)
-        peak_year = years[peak_index]
-        peak_value = y_probs[peak_index]
+            st.subheader("Executive Trend Assessment")
 
-        overall_change = last_prob - first_prob
+            first_year = years_arr[0]
+            last_year = years_arr[-1]
 
-        # Determine direction
-        if overall_change > 0.05:
-            trend_direction = "Overall worsening trend."
-        elif overall_change < -0.05:
-            trend_direction = "Overall improving trend."
-        else:
-            trend_direction = "Overall relatively stable trend."
+            first_prob = y_probs[0]
+            last_prob = y_probs[-1]
 
-        # Structural persistence
-        if years_above == len(y_probs):
-            structural_status = "Above threshold every observed year."
-        else:
-            structural_status = "Not consistently above threshold."
+            peak_index = np.argmax(y_probs)
+            peak_year = years_arr[peak_index]
+            peak_value = y_probs[peak_index]
 
-        st.markdown("### 📊 Executive Trend Assessment")
+            overall_change = last_prob - first_prob
 
-        st.markdown(f"""
-        **This school is:**
+            if overall_change > 0.05:
+                trend_direction = "Overall worsening trend."
+            elif overall_change < -0.05:
+                trend_direction = "Overall improving trend."
+            else:
+                trend_direction = "Overall relatively stable trend."
 
-        - {structural_status}
-        - Peak risk occurred in **{peak_year}** at **{peak_value:.2%}**
-        - Risk changed from **{first_prob:.2%}** in {first_year}  
-        to **{last_prob:.2%}** in {last_year}
+            if years_above == len(y_probs):
+                structural_status = "Above threshold every observed year."
+            else:
+                structural_status = "Not consistently above threshold."
 
-        ---
+            st.markdown(f"""
+**This school is:**
 
-        **Overall Pattern:**
+• {structural_status}
 
-        {trend_direction}
+• Peak risk occurred in **{peak_year}** at **{peak_value:.2%}**
 
-        Even at **{last_prob:.2%}**, this school remains  
-        **{last_prob/threshold:.1f}× above the 25% threshold**,  
-        indicating continued structural strain risk.
-        """)
+• Risk changed from **{first_prob:.2%}** in {first_year}  
+to **{last_prob:.2%}** in {last_year}
+
+---
+
+**Overall Pattern**
+
+{trend_direction}
+
+Even at **{last_prob:.2%}**, this school remains  
+**{last_prob/threshold:.1f}× above the 25% threshold**,  
+indicating continued structural strain risk.
+""")
 
     # =====================================================
-    # EXPANDER 1 — HOW TO INTERPRET THE NUMBERS
+    # EXPANDER — HOW TO INTERPRET
     # =====================================================
     with st.expander("📘 How To Interpret These Numbers"):
 
         st.markdown("""
-        ### Understanding the Scale of the Values
+### Understanding the Scale of the Values
 
-        This dataset includes different numeric types:
+Binary Indicators  
+• 1 = Yes  
+• 0 = No  
 
-        #### 1️⃣ Binary Indicators
-        • **1 = Yes / True**  
-        • **0 = No / False**  
-        Example: `high_strain`
+Proportions  
+• Values like 0.05 represent 5%
 
-        #### 2️⃣ Percentage Values (Already in %)
-        Values like **2.2, 24.9, 15.2** represent percentages directly.  
-        Example:  
-        `24.9` = 24.9% of households fall in that income band.
+Percentages  
+• Values like 23 represent 23%
 
-        #### 3️⃣ Proportion Values (0–1 Scale)
-        Values like **0.0506** represent proportions.  
-        Example:  
-        `0.0506` = 5.06% of students.
-
-        ---
-
-        Higher values indicate greater concentration of that
-        demographic or economic characteristic.
-        """)
+Higher values indicate greater concentration of
+that demographic or socioeconomic characteristic.
+""")
 
     # =====================================================
-    # EXPANDER 2 — WHAT EACH COLUMN MEANS
+    # EXPANDER — COLUMN DEFINITIONS
     # =====================================================
     with st.expander("📚 What Each Column Represents"):
 
         st.markdown("""
-        ### Core Identifiers
+NCESSCH — NCES School ID  
+SCH_NAME — School name  
+SURVYEAR — Year of data
 
-        • **NCESSCH** – National Center for Education Statistics school ID  
-        • **SCH_NAME** – School name  
-        • **SURVYEAR** – School year  
+high_strain — 1 = school classified as strained
 
-        ### Strain Indicator
+Income Distribution  
+TH_10_15K — households earning $10–15k  
+TH_15_25K — households earning $15–25k  
+TH_50_75K — households earning $50–75k  
+TH_75_100K — households earning $75–100k  
+TH_100_150K — households earning $100–150k  
+TH_150_200K — households earning $150–200k  
+TH_200K_AND_ABOVE — households above $200k
 
-        • **high_strain** – 1 = School identified as overcrowded / strained  
-          0 = Not identified as strained  
+Demographics  
+prop_BL — % Black students  
+prop_WH — % White students  
+prop_HI — % Hispanic students  
+prop_AS — % Asian students  
+prop_AM — % American Indian students  
+prop_TR — % two or more races
 
-        ### Income Distribution (Household %)
-
-        • **TH_10_15K** – % households earning $10k–$15k  
-        • **TH_15_25K** – % earning $15k–$25k  
-        • **TH_50_75K** – % earning $50k–$75k  
-        • **TH_75_100K** – % earning $75k–$100k  
-        • **TH_100_150K** – % earning $100k–$150k  
-        • **TH_150_200K** – % earning $150k–$200k  
-        • **TH_200K_AND_ABOVE** – % earning over $200k  
-
-        ### Assistance Indicators
-
-        • **TH_WITH_SNAP** – % households receiving SNAP benefits  
-        • **TH_WITH_CASH_ASSIST** – % receiving cash assistance  
-
-        ### Demographic Composition (Student %)
-
-        • **prop_BL** – % Black students  
-        • **prop_WH** – % White students  
-        • **prop_HI** – % Hispanic students  
-        • **prop_AS** – % Asian students  
-        • **prop_AM** – % American Indian students  
-        • **prop_TR** – % Two or more races  
-
-        ### Economic Need
-
-        • **frl_ratio** – % eligible for Free/Reduced Lunch  
-        • **redl_ratio** – Reduced lunch only ratio  
-
-        ---
-
-        These indicators help evaluate socioeconomic concentration,
-        demographic composition, and potential strain drivers.
-        """)
-
-# =========================================================
-# TAB 3 — MODEL EVALUATION
-# =========================================================
-with tab3:
-
-    st.header("Model Evaluation")
-
-    from sklearn.metrics import (
-        roc_curve,
-        precision_recall_curve,
-        roc_auc_score,
-        average_precision_score,
-    )
-
-    X_all = df[feature_list]
-    y_true = df["high_strain"]
-    y_probs = model.predict_proba(X_all)[:, 1]
-
-    # -------- ROC --------
-    st.subheader("ROC Curve")
-
-    fpr, tpr, _ = roc_curve(y_true, y_probs)
-    roc_auc = roc_auc_score(y_true, y_probs)
-
-    fig, ax = plt.subplots(figsize=(5, 3))
-    ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-    ax.plot([0, 1], [0, 1], linestyle="--")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.legend()
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    # -------- PR --------
-    st.subheader("Precision-Recall Curve")
-
-    precision, recall, _ = precision_recall_curve(y_true, y_probs)
-    avg_precision = average_precision_score(y_true, y_probs)
-
-    fig2, ax2 = plt.subplots(figsize=(5, 3))
-    ax2.plot(recall, precision, label=f"AP = {avg_precision:.3f}")
-    ax2.set_xlabel("Recall")
-    ax2.set_ylabel("Precision")
-    ax2.legend()
-    plt.tight_layout()
-    st.pyplot(fig2)
-
-    # -------- Metrics --------
-    colM1, colM2 = st.columns(2)
-    with colM1:
-        st.metric("ROC-AUC", f"{roc_auc:.3f}")
-    with colM2:
-        st.metric("Average Precision", f"{avg_precision:.3f}")
+Economic Need  
+frl_ratio — free/reduced lunch  
+redl_ratio — reduced lunch only
+""")
