@@ -4,3 +4,4 @@ scikit-learn
 joblib
 shap
 openai
+matplotlib==3.7.2
