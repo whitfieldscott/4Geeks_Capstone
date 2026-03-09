@@ -299,7 +299,7 @@ with tab2:
         X_school = school_one_year[feature_list]
 
         predicted_prob = float(model.predict_proba(X_school)[:, 1][0])
-        predicted_label = int(predicted_prob >= 0.25)
+        predicted_label = int(predicted_prob >= 0.5)
 
         actual_label = int(school_one_year["high_strain"].values[0])
 
@@ -308,7 +308,7 @@ with tab2:
         colA, colB = st.columns(2)
 
         with colA:
-            st.metric("Predicted Risk Probability", f"{predicted_prob:.2%}")
+            st.metric("Predicted Probability of Strain", f"{predicted_prob:.2%}")
 
         with colB:
             if predicted_label == 1:
@@ -351,12 +351,11 @@ with tab2:
 
         avg_prob = np.mean(y_probs)
 
-        threshold = 0.25
-        years_above = np.sum(y_probs > threshold)
+        risk_growth = ((y_probs[-1] - y_probs[0]) / y_probs[0]) * 100
 
         st.subheader("Multi-Year Risk Assessment")
 
-        colA, colB, colC = st.columns(3)
+        colA, colB, colC, colD = st.columns(4)
 
         with colA:
             st.metric("Latest Year Risk", f"{latest_prob:.2%}")
@@ -367,12 +366,10 @@ with tab2:
         with colC:
             st.metric("Average Multi-Year Risk", f"{avg_prob:.2%}")
 
-        if years_above == len(y_probs):
-            st.warning("⚠️ Above threshold in every observed year.")
-        elif years_above == 0:
-            st.success("Below threshold in all observed years.")
-        else:
-            st.info("Mixed performance across years.")
+        with colD:
+            st.metric("Risk Growth Since Start", f"{risk_growth:.1f}%")
+
+        st.info("Risk probabilities vary across observed years.")
 
         # ===============================
         # CHART + EXECUTIVE SUMMARY
@@ -387,10 +384,9 @@ with tab2:
             fig_trend, ax_trend = plt.subplots(figsize=(4, 2.5), dpi=100)
 
             ax_trend.plot(years_arr, y_probs, marker="o")
-            ax_trend.axhline(threshold, linestyle="--")
 
             ax_trend.set_xlabel("Year", fontsize=8)
-            ax_trend.set_ylabel("Predicted Risk", fontsize=8)
+            ax_trend.set_ylabel("Probability of Strain", fontsize=8)
 
             ax_trend.tick_params(labelsize=8)
 
@@ -398,7 +394,9 @@ with tab2:
 
             st.pyplot(fig_trend, use_container_width=False)
 
-            st.caption("Dashed line represents the 25% strain classification threshold.")
+            st.caption(
+                "Chart shows the model-estimated probability of structural strain over time."
+            )
 
         # -------- Executive Summary --------
         with col_summary:
@@ -424,10 +422,9 @@ with tab2:
             else:
                 trend_direction = "Overall relatively stable trend."
 
-            if years_above == len(y_probs):
-                structural_status = "Above threshold every observed year."
-            else:
-                structural_status = "Not consistently above threshold."
+            structural_status = (
+                "Probability of strain remains elevated across observed years."
+            )
 
             st.markdown(f"""
 **This school is:**
@@ -445,9 +442,7 @@ to **{last_prob:.2%}** in {last_year}
 
 {trend_direction}
 
-Even at **{last_prob:.2%}**, this school remains  
-**{last_prob/threshold:.1f}× above the 25% threshold**,  
-indicating continued structural strain risk.
+The most recent model estimate is **{last_prob:.2%}**, indicating continued structural strain risk.
 """)
 
     # =====================================================
