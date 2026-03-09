@@ -15,4 +15,4 @@ sympy>=1.10.1
 xgboost
 ipykernel
 streamlit
-matplotlib==3.7.2
+matplotlib
