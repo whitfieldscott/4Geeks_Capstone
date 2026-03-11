@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import requests
 import tempfile
+import shap
+from openai import OpenAI
 
 # ---------------------------------------------------------
 # PAGE CONFIG (MUST BE FIRST STREAMLIT COMMAND)
@@ -45,12 +47,16 @@ st.title("School Strain Monitoring Platform")
 # ---------------------------------------------------------
 DATA_URL = "https://huggingface.co/datasets/whitfieldscott/school_strain_data/resolve/main/xgb_production_dataset.csv"
 MODEL_URL = "https://huggingface.co/datasets/whitfieldscott/school_strain_data/resolve/main/xgb_model.pkl"
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
 
 @st.cache_data
 def load_data():
     return pd.read_csv(DATA_URL)
 
 df = load_data()
+
+
 
 @st.cache_resource
 def load_model_and_features(dataframe: pd.DataFrame):
@@ -96,6 +102,45 @@ def load_model_and_features(dataframe: pd.DataFrame):
     return model, feature_list, feature_importance_df
 
 model, feature_list, feature_importance_df = load_model_and_features(df)
+
+# ---------------------------------------------------------
+# LOAD SHAP EXPLAINER
+# ---------------------------------------------------------
+@st.cache_resource
+def load_shap_explainer(_model):
+    explainer = shap.TreeExplainer(_model)
+    return explainer
+
+explainer = load_shap_explainer(model)
+
+# ---------------------------------------------------------
+# OPENAI SUMMARY FUNCTION
+# ---------------------------------------------------------
+
+@st.cache_data
+def generate_ai_summary(predicted_prob, year, school_name, shap_features):
+
+    prompt = f"""
+You are an education data analyst.
+
+A machine learning model predicted a structural strain risk for a school.
+
+School: {school_name}
+Year: {year}
+Predicted strain probability: {predicted_prob:.2%}
+
+Top contributing factors:
+{shap_features}
+
+Write a short executive-style interpretation explaining what this means and what administrators should consider.
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content
 
 # ---------------------------------------------------------
 # CREATE TABS (TAB 1 + TAB 2 ONLY)
@@ -251,16 +296,43 @@ with tab2:
 
     st.header("School Deep Dive")
 
-    # -----------------------------------------------------
-    # SELECTORS
-    # -----------------------------------------------------
-    school_list = sorted(df["SCH_NAME"].unique())
-    selected_school = st.selectbox("Select School", school_list)
 
-    years = sorted(df["SURVYEAR"].unique(), reverse=True)
-    selected_year = st.selectbox("Select Year", ["All Years"] + years)
+    # -----------------------------------------------------
+    # SCHOOL SELECTOR
+    # -----------------------------------------------------
+    school_lookup = (
+        df[["SCH_NAME", "NCESSCH"]]
+        .drop_duplicates()
+        .sort_values("SCH_NAME")
+        .reset_index(drop=True)
+    )
 
-    school_all_years = df[df["SCH_NAME"] == selected_school].copy()
+    school_lookup["display_name"] = (
+        school_lookup["SCH_NAME"] + " (ID: " + school_lookup["NCESSCH"].astype(str) + ")"
+    )
+
+    selected_display = st.selectbox(
+        "Select School",
+        school_lookup["display_name"]
+    )
+
+    selected_nces = school_lookup.loc[
+        school_lookup["display_name"] == selected_display,
+        "NCESSCH"
+    ].iloc[0]
+
+    school_all_years = df[df["NCESSCH"] == selected_nces].copy()
+
+
+    # -----------------------------------------------------
+    # YEAR SELECTOR
+    # -----------------------------------------------------
+    years = sorted(school_all_years["SURVYEAR"].unique(), reverse=True)
+
+    selected_year = st.selectbox(
+        "Select Year",
+        ["All Years"] + years
+    )
 
     # -----------------------------------------------------
     # HELPER FUNCTION — FORMAT TABLE
@@ -273,13 +345,13 @@ with tab2:
 
                 max_val = display_df[col].max()
 
-                if max_val <= 1 and col != "high_strain":
-                    display_df[col] = (display_df[col] * 100).round(2)
+            if max_val <= 1 and col != "high_strain":
+                display_df[col] = (display_df[col] * 100).round(2)
 
-                elif max_val > 1:
-                    display_df[col] = display_df[col].round(2)
+            elif max_val > 1:
+                display_df[col] = display_df[col].round(2)
 
-        return display_df
+            return display_df
 
     # -----------------------------------------------------
     # SINGLE YEAR MODE
@@ -300,6 +372,52 @@ with tab2:
 
         predicted_prob = float(model.predict_proba(X_school)[:, 1][0])
         predicted_label = int(predicted_prob >= 0.5)
+
+                
+        # -----------------------------------------------------
+        # SHAP EXPLANATION
+        # -----------------------------------------------------
+        st.subheader("Key Drivers of This Prediction")
+
+        shap_values = explainer(X_school)
+        
+        shap_df = pd.DataFrame({
+            "feature": feature_list,
+            "impact": shap_values.values[0]
+        })
+
+        top_features = (
+            shap_df
+            .assign(abs_impact=lambda x: np.abs(x["impact"]))
+            .sort_values("abs_impact", ascending=False)
+            .head(10)
+        )
+
+        top_feature_list = top_features["feature"].tolist()
+
+        fig_shap, ax_shap = plt.subplots(figsize=(4,2.5), dpi=100)
+
+        ax_shap.barh(top_features["feature"], top_features["impact"])
+        ax_shap.axvline(0)
+        ax_shap.invert_yaxis()
+
+        ax_shap.set_xlabel("Impact on Prediction", fontsize=8)
+        ax_shap.tick_params(labelsize=8)
+
+        plt.tight_layout()
+
+        st.pyplot(fig_shap, use_container_width=False)
+
+        ai_summary = generate_ai_summary(
+            predicted_prob,
+            selected_year,
+            school_one_year["SCH_NAME"].values[0],
+            top_feature_list
+        )
+
+        st.subheader("AI Interpretation")
+
+        st.info(ai_summary)
 
         actual_label = int(school_one_year["high_strain"].values[0])
 
