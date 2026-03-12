@@ -56,7 +56,37 @@ def load_data():
 
 df = load_data()
 
+df = load_data()
 
+# ---------------------------------------------------------
+# FEATURE LABELS (Human-readable names for SHAP plots)
+# ---------------------------------------------------------
+
+feature_labels = {
+    "TH_WITH_SNAP": "Households Receiving SNAP",
+    "TH_LT_10K": "Households earning < $10K",
+    "TH_10_15K": "Households earning $10–15K",
+    "TH_15_25K": "Households earning $15–25K",
+    "TH_35_50K": "Households earning $35–50K",
+    "TH_50_75K": "Households earning $50–75K",
+    "TH_75_100K": "Households earning $75–100K",
+    "TH_100_150K": "Households earning $100–150K",
+    "TH_150_200K": "Households earning $150–200K",
+    "TH_200K_AND_ABOVE": "Households earning $200K+",
+
+    "prop_BL": "% Black Students",
+    "prop_WH": "% White Students",
+    "prop_HI": "% Hispanic Students",
+    "prop_AS": "% Asian Students",
+    "prop_AM": "% American Indian Students",
+    "prop_TR": "% Two or More Races",
+
+    "frl_ratio": "Free/Reduced Lunch Ratio",
+    "redl_ratio": "Reduced Lunch Ratio Only",
+
+    "BPL_ALL": "Population Below Poverty Level",
+    "locale_category_Rural": "Rural School Location"
+}
 
 @st.cache_resource
 def load_model_and_features(dataframe: pd.DataFrame):
@@ -102,6 +132,8 @@ def load_model_and_features(dataframe: pd.DataFrame):
     return model, feature_list, feature_importance_df
 
 model, feature_list, feature_importance_df = load_model_and_features(df)
+
+
 
 # ---------------------------------------------------------
 # LOAD SHAP EXPLAINER
@@ -397,15 +429,17 @@ with tab2:
 
         fig_shap, ax_shap = plt.subplots(figsize=(4,2.5), dpi=100)
 
-        ax_shap.barh(top_features["feature"], top_features["impact"])
+        # Convert feature names to readable labels
+        display_features = [feature_labels.get(f, f) for f in top_features["feature"]]
+
+        ax_shap.barh(display_features, top_features["impact"])
+
         ax_shap.axvline(0)
         ax_shap.invert_yaxis()
-
         ax_shap.set_xlabel("Impact on Prediction", fontsize=8)
         ax_shap.tick_params(labelsize=8)
 
         plt.tight_layout()
-
         st.pyplot(fig_shap, use_container_width=False)
 
         ai_summary = generate_ai_summary(
@@ -544,24 +578,41 @@ with tab2:
                 "Probability of strain remains elevated across observed years."
             )
 
+
+        # -----------------------------------------------------
+        # RISK INTERPRETATION LEVEL
+        # -----------------------------------------------------
+
+        with col_summary:
+
+                # interpretation logic
+            if last_prob < 0.10:
+                interpretation = "low predicted strain risk"
+            elif last_prob < 0.25:
+                interpretation = "mild strain risk"
+            elif last_prob < 0.50:
+                interpretation = "moderate strain risk"
+            elif last_prob < 0.75:
+                interpretation = "high strain risk"
+            else:
+                interpretation = "severe strain risk"
+
             st.markdown(f"""
-**This school is:**
+            **This school is:**
 
-• {structural_status}
+            • {structural_status}
 
-• Peak risk occurred in **{peak_year}** at **{peak_value:.2%}**
+            • Peak risk occurred in **{peak_year}** at **{peak_value:.2%}**
 
-• Risk changed from **{first_prob:.2%}** in {first_year}  
-to **{last_prob:.2%}** in {last_year}
+            • Risk changed from **{first_prob:.2%}** in {first_year}
+            to **{last_prob:.2%}** in {last_year}
 
----
+            **Overall Pattern**
 
-**Overall Pattern**
+            {trend_direction}
 
-{trend_direction}
-
-The most recent model estimate is **{last_prob:.2%}**, indicating continued structural strain risk.
-""")
+            The most recent model estimate is **{last_prob:.2%}**, indicating **{interpretation}**.
+            """)
 
     # =====================================================
     # EXPANDER — HOW TO INTERPRET
