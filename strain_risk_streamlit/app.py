@@ -3,6 +3,11 @@ import pandas as pd
 import joblib
 import numpy as np
 import matplotlib.pyplot as plt
+import requests
+import tempfile
+import shap
+from openai import OpenAI
+from sklearn.metrics import roc_curve, auc
 
 # ---------------------------------------------------------
 # PAGE CONFIG (MUST BE FIRST STREAMLIT COMMAND)
@@ -41,25 +46,139 @@ st.title("School Strain Monitoring Platform")
 # ---------------------------------------------------------
 # LOAD DATA + MODEL
 # ---------------------------------------------------------
+DATA_URL = "https://huggingface.co/datasets/whitfieldscott/school_strain_data/resolve/main/xgb_production_dataset.csv"
+MODEL_URL = "https://huggingface.co/datasets/whitfieldscott/school_strain_data/resolve/main/xgb_model.pkl"
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+
 @st.cache_data
 def load_data():
-    return pd.read_csv("rf_production_dataset.csv")
-
-@st.cache_resource
-def load_model():
-    model = joblib.load("rf_model.pkl")
-    feature_list = joblib.load("rf_feature_list.pkl")
-    return model, feature_list
+    return pd.read_csv(DATA_URL)
 
 df = load_data()
-model, feature_list = load_model()
+
+df = load_data()
 
 # ---------------------------------------------------------
-# CREATE TABS
+# FEATURE LABELS (Human-readable names for SHAP plots)
 # ---------------------------------------------------------
-tab1, tab2, tab3 = st.tabs(
-    ["Project Overview", "School Deep Dive", "Model Evaluation"]
-)
+
+feature_labels = {
+    "TH_WITH_SNAP": "Households Receiving SNAP",
+    "TH_LT_10K": "Households earning < $10K",
+    "TH_10_15K": "Households earning $10–15K",
+    "TH_15_25K": "Households earning $15–25K",
+    "TH_35_50K": "Households earning $35–50K",
+    "TH_50_75K": "Households earning $50–75K",
+    "TH_75_100K": "Households earning $75–100K",
+    "TH_100_150K": "Households earning $100–150K",
+    "TH_150_200K": "Households earning $150–200K",
+    "TH_200K_AND_ABOVE": "Households earning $200K+",
+
+    "prop_BL": "% Black Students",
+    "prop_WH": "% White Students",
+    "prop_HI": "% Hispanic Students",
+    "prop_AS": "% Asian Students",
+    "prop_AM": "% American Indian Students",
+    "prop_TR": "% Two or More Races",
+
+    "frl_ratio": "Free/Reduced Lunch Ratio",
+    "redl_ratio": "Reduced Lunch Ratio Only",
+
+    "BPL_ALL": "Population Below Poverty Level",
+    "locale_category_Rural": "Rural School Location"
+}
+
+@st.cache_resource
+def load_model_and_features(dataframe: pd.DataFrame):
+    """
+    Load XGBoost model and derive:
+    
+    - feature_list from dataframe (drop ID/target columns)
+    - feature_importance_df from model.get_booster().get_score('gain')
+      aligned to feature_list so it always matches the dataset columns.
+    """
+
+    # Download model from HuggingFace
+    response = requests.get(MODEL_URL)
+
+    # Write to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(response.content)
+        tmp_path = tmp.name
+
+    model = joblib.load(tmp_path)
+
+    # Build feature list from the dataset (most reliable)
+    exclude_cols = {"NCESSCH", "SCH_NAME", "SURVYEAR", "high_strain"}
+    feature_list = [c for c in dataframe.columns if c not in exclude_cols]
+
+    # Compute feature importance from model
+    booster = model.get_booster()
+    gain_scores = booster.get_score(importance_type="gain")  # dict: feature -> gain
+
+    # Align importance to dataset features
+    feature_importance_df = (
+        pd.DataFrame({"feature": feature_list})
+        .assign(total_gain=lambda d: d["feature"].map(gain_scores).fillna(0.0))
+        .sort_values("total_gain", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    total = feature_importance_df["total_gain"].sum()
+    feature_importance_df["pct_of_total"] = (
+        feature_importance_df["total_gain"] / total if total > 0 else 0.0
+    )
+
+    return model, feature_list, feature_importance_df
+
+model, feature_list, feature_importance_df = load_model_and_features(df)
+
+
+
+# ---------------------------------------------------------
+# LOAD SHAP EXPLAINER
+# ---------------------------------------------------------
+@st.cache_resource
+def load_shap_explainer(_model):
+    explainer = shap.TreeExplainer(_model)
+    return explainer
+
+explainer = load_shap_explainer(model)
+
+# ---------------------------------------------------------
+# OPENAI SUMMARY FUNCTION
+# ---------------------------------------------------------
+
+@st.cache_data
+def generate_ai_summary(predicted_prob, year, school_name, shap_features):
+
+    prompt = f"""
+You are an education data analyst.
+
+A machine learning model predicted a structural strain risk for a school.
+
+School: {school_name}
+Year: {year}
+Predicted strain probability: {predicted_prob:.2%}
+
+Top contributing factors:
+{shap_features}
+
+Write a short executive-style interpretation explaining what this means and what administrators should consider.
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content
+
+# ---------------------------------------------------------
+# CREATE TABS (TAB 1 + TAB 2 ONLY)
+# ---------------------------------------------------------
+tab1, tab2 = st.tabs(["Project Overview", "School Deep Dive"])
 
 # =========================================================
 # TAB 1 — PROJECT OVERVIEW
@@ -71,24 +190,33 @@ with tab1:
     # -----------------------------------------------------
     st.header("School Strain Monitoring Platform")
 
-    st.markdown("""
-    ### Research Question
+    st.markdown("### Research Question")
 
-    Can socioeconomic and demographic characteristics be used to predict  
-    which schools are at risk for elevated student–teacher structural strain?
+    st.markdown(
+    """
+    <div style="max-width:700px;">
+    Can school and community characteristics help predict which schools
+    experience higher student-teacher ratios?
+    </div>
+    """,
+    unsafe_allow_html=True
+    )
 
-    ---
-    """)
+    st.markdown("---")
 
-    st.markdown("""
-    ### Project Framing
+    st.markdown("### Project Framing")
 
-    A data-driven early warning system designed to identify schools  
-    at elevated risk of structural strain before operational pressures escalate.
-    """)
+    st.markdown(
+    """
+    <div style="max-width:700px;">
+    We used machine learning to analyze national school and socioeconomic
+    data to identify patterns associated with higher student-teacher ratios.
+    </div>
+    """,
+    unsafe_allow_html=True
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
-
 
     # =====================================================
     # BUSINESS PROBLEM
@@ -106,7 +234,6 @@ with tab1:
     """)
 
     st.markdown("<br>", unsafe_allow_html=True)
-
 
     # =====================================================
     # DATA COLLECTION & SCOPE
@@ -133,68 +260,102 @@ with tab1:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
 
-
     # =====================================================
     # KEY SYSTEM-WIDE FINDINGS
     # =====================================================
     st.subheader("Key Findings")
-
-    strain_rate = df["high_strain"].mean()
-    st.metric("Overall High Strain Rate Across Schools", f"{strain_rate:.2%}")
 
     X_all = df[feature_list]
     all_probs = model.predict_proba(X_all)[:, 1]
 
     col1, col2 = st.columns(2)
 
-    # ---------------- Risk Distribution ----------------
-    with col1:
-        st.markdown("**System-Wide Risk Distribution**")
+# ---------------- ROC-AUC PERFORMANCE ----------------
+with col1:
+    st.markdown("**Model Performance (ROC-AUC Curve)**")
 
-        fig, ax = plt.subplots(figsize=(5, 3), dpi=100)
-        ax.hist(all_probs, bins=30)
-        ax.set_xlabel("Predicted Risk", fontsize=9)
-        ax.set_ylabel("")
-        ax.tick_params(labelsize=9)
-        plt.tight_layout()
-        st.pyplot(fig)
+     # actual values
+    y_true = df["high_strain"]
 
-        st.markdown("""
-        Most schools cluster at lower predicted risk levels,  
-        while a smaller segment consistently shows elevated strain probability.
-        """)
+    # predicted probabilities
+    y_scores = model.predict_proba(df[feature_list])[:, 1]
 
-    # ---------------- Feature Importance ----------------
-    with col2:
-        st.markdown("**Top Predictive Drivers**")
+    fpr, tpr, _ = roc_curve(y_true, y_scores)
+    roc_auc = auc(fpr, tpr)
 
-        importances = model.feature_importances_
+    fig, ax = plt.subplots(figsize=(5,3), dpi=100)
 
-        feature_importance = (
-            pd.DataFrame({
-                "feature": feature_list,
-                "importance": importances
-            })
-            .sort_values("importance", ascending=False)
-            .head(15)
+    ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+    ax.plot([0,1],[0,1], linestyle="--")
+
+    ax.set_xlabel("False Positive Rate", fontsize=9)
+    ax.set_ylabel("True Positive Rate", fontsize=9)
+    ax.tick_params(labelsize=9)
+
+    ax.legend(loc="lower right")
+
+    plt.tight_layout()
+    st.pyplot(fig)
+
+    st.markdown(f"""
+    The ROC curve evaluates how well the model distinguishes between schools
+    experiencing structural strain and those that are not.
+
+    The model achieved an **AUC score of {roc_auc:.3f}**, indicating strong
+    predictive capability. An AUC close to 1.0 means the model can reliably
+    separate higher-risk schools from lower-risk schools across a range of
+    classification thresholds.
+    """)
+
+
+# ---------------- PRECISION vs RECALL ----------------
+with col2:
+    st.markdown("**XGBoost: Precision vs Recall**")
+
+    from sklearn.metrics import precision_score, recall_score
+
+    # predictions
+    y_pred = (model.predict_proba(df[feature_list])[:,1] > 0.5).astype(int)
+
+    precision = precision_score(df["high_strain"], y_pred)
+    recall = recall_score(df["high_strain"], y_pred)
+
+    fig2, ax2 = plt.subplots(figsize=(5,3), dpi=100)
+
+    metrics = ["Precision", "Recall"]
+    values = [precision, recall]
+
+    bars = ax2.bar(metrics, values)
+
+    ax2.set_ylim(0,1)
+    ax2.set_ylabel("Score", fontsize=9)
+    ax2.tick_params(labelsize=9)
+
+    # add percentages above bars
+    for bar, val in zip(bars, values):
+        ax2.text(
+            bar.get_x() + bar.get_width()/2,
+            val + 0.02,
+            f"{val*100:.1f}%",
+            ha="center",
+            fontsize=9
         )
 
-        fig2, ax2 = plt.subplots(figsize=(5, 3), dpi=100)
-        ax2.barh(feature_importance["feature"], feature_importance["importance"])
-        ax2.invert_yaxis()
-        ax2.set_xlabel("Importance", fontsize=9)
-        ax2.set_ylabel("")
-        ax2.tick_params(labelsize=9)
-        plt.tight_layout()
-        st.pyplot(fig2)
+    plt.tight_layout()
+    st.pyplot(fig2)
 
-        st.markdown("""
-        Both Random Forest and XGBoost independently surfaced similar drivers,  
-        strengthening confidence in the stability of these findings.
-        """)
+    st.markdown("""
+    Precision measures how often the model is correct when it predicts a school
+    is experiencing structural strain. Recall measures how effectively the model
+    identifies schools that truly face elevated strain risk.
+
+    The model prioritizes **recall**, meaning it is more focused on identifying
+    potentially strained schools rather than missing them, which is appropriate
+    for early-warning monitoring systems used by education administrators.
+    """)
+
 
     st.markdown("<br>", unsafe_allow_html=True)
-
 
     # =====================================================
     # INTERPRETATION & CONCLUSION
@@ -202,57 +363,83 @@ with tab1:
     st.subheader("Interpretation & Conclusion")
 
     st.markdown("""
-    • Structural strain is not random — it follows identifiable patterns  
+• Structural strain is not random — it follows identifiable patterns  
 
-    • Grade composition and socioeconomic concentration consistently  
-      emerge as strong indicators  
+• Grade composition and socioeconomic concentration consistently  
+emerge as strong indicators  
 
-    • Model agreement increases confidence in prioritization decisions  
+• Model agreement increases confidence in prioritization decisions  
 
-    • This tool should support leadership — not replace local expertise  
+• This tool should support leadership — not replace local expertise  
 
-    **Conclusion:**  
-    Predictive modeling enables earlier identification, smarter prioritization,  
-    and more proactive resource planning.
-    """)
+**Conclusion:**  
+Predictive modeling enables earlier identification, smarter prioritization,  
+and more proactive resource planning.
+""")
 
 # =========================================================
-# TAB 2 — SCHOOL DEEP DIVE (POLISHED + EXPLAINABLE)
+# TAB 2 — SCHOOL DEEP DIVE
 # =========================================================
 with tab2:
 
     st.header("School Deep Dive")
 
-    # -----------------------------------------------------
-    # SELECTORS
-    # -----------------------------------------------------
-    school_list = sorted(df["SCH_NAME"].unique())
-    selected_school = st.selectbox("Select School", school_list)
-
-    years = sorted(df["SURVYEAR"].unique(), reverse=True)
-    selected_year = st.selectbox("Select Year", ["All Years"] + years)
-
-    school_all_years = df[df["SCH_NAME"] == selected_school].copy()
 
     # -----------------------------------------------------
-    # HELPER FUNCTION — FORMAT TABLE FOR DISPLAY
+    # SCHOOL SELECTOR
+    # -----------------------------------------------------
+    school_lookup = (
+        df[["SCH_NAME", "NCESSCH"]]
+        .drop_duplicates()
+        .sort_values("SCH_NAME")
+        .reset_index(drop=True)
+    )
+
+    school_lookup["display_name"] = (
+        school_lookup["SCH_NAME"] + " (ID: " + school_lookup["NCESSCH"].astype(str) + ")"
+    )
+
+    selected_display = st.selectbox(
+        "Select School",
+        school_lookup["display_name"]
+    )
+
+    selected_nces = school_lookup.loc[
+        school_lookup["display_name"] == selected_display,
+        "NCESSCH"
+    ].iloc[0]
+
+    school_all_years = df[df["NCESSCH"] == selected_nces].copy()
+
+
+    # -----------------------------------------------------
+    # YEAR SELECTOR
+    # -----------------------------------------------------
+    years = sorted(school_all_years["SURVYEAR"].unique(), reverse=True)
+
+    selected_year = st.selectbox(
+        "Select Year",
+        ["All Years"] + years
+    )
+
+    # -----------------------------------------------------
+    # HELPER FUNCTION — FORMAT TABLE
     # -----------------------------------------------------
     def format_display_table(dataframe):
         display_df = dataframe.copy()
 
         for col in display_df.columns:
             if display_df[col].dtype != "object":
+
                 max_val = display_df[col].max()
 
-                # Convert proportions (0–1 scale) into percentages
-                if max_val <= 1 and col != "high_strain":
-                    display_df[col] = (display_df[col] * 100).round(2)
+            if max_val <= 1 and col != "high_strain":
+                display_df[col] = (display_df[col] * 100).round(2)
 
-                # Round regular percentage values
-                elif max_val > 1:
-                    display_df[col] = display_df[col].round(2)
+            elif max_val > 1:
+                display_df[col] = display_df[col].round(2)
 
-        return display_df
+            return display_df
 
     # -----------------------------------------------------
     # SINGLE YEAR MODE
@@ -270,8 +457,97 @@ with tab2:
 
         # ---------------- Risk Assessment ----------------
         X_school = school_one_year[feature_list]
+
         predicted_prob = float(model.predict_proba(X_school)[:, 1][0])
-        predicted_label = int(predicted_prob >= 0.25)
+        predicted_label = int(predicted_prob >= 0.5)
+
+                
+        # -----------------------------------------------------
+        # SHAP EXPLANATION
+        # -----------------------------------------------------
+        st.subheader("Key Drivers of This Prediction")
+
+        shap_values = explainer(X_school)
+        
+        shap_df = pd.DataFrame({
+            "feature": feature_list,
+            "impact": shap_values.values[0]
+        })
+
+        top_features = (
+            shap_df
+            .assign(abs_impact=lambda x: np.abs(x["impact"]))
+            .sort_values("abs_impact", ascending=False)
+            .head(10)
+        )
+
+        top_feature_list = top_features["feature"].tolist()
+
+        fig_shap, ax_shap = plt.subplots(figsize=(4,2.5), dpi=100)
+
+        # Convert feature names to readable labels
+        display_features = [feature_labels.get(f, f) for f in top_features["feature"]]
+
+        ax_shap.barh(display_features, top_features["impact"])
+
+        ax_shap.axvline(0)
+        ax_shap.invert_yaxis()
+        ax_shap.set_xlabel("Impact on Prediction", fontsize=8)
+        ax_shap.tick_params(labelsize=8)
+
+        plt.tight_layout()
+        st.pyplot(fig_shap, use_container_width=False)
+
+        ai_summary = generate_ai_summary(
+            predicted_prob,
+            selected_year,
+            school_one_year["SCH_NAME"].values[0],
+            top_feature_list
+        )
+
+        st.subheader("AI Interpretation")
+
+        st.info(ai_summary)
+
+        # -----------------------------------------------------
+        # ASK AI ABOUT THIS SCHOOL
+        # -----------------------------------------------------
+
+        st.subheader("AI Policy Assistant")
+
+        user_question = st.text_input(
+            "Ask a question about this school's strain risk:"
+        )
+
+        if st.button("Ask AI") and user_question:
+
+            prompt = f"""
+            You are an education policy analyst.
+
+            School: {school_one_year["SCH_NAME"].values[0]}
+            Year: {selected_year}
+
+            Predicted strain probability: {predicted_prob:.2%}
+
+            Key contributing factors:
+            {top_feature_list}
+
+            User question:
+            {user_question}
+
+            Provide a concise explanation and possible policy or administrative actions.
+            """
+
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": prompt}]
+            )
+
+            answer = response.choices[0].message.content
+
+            st.markdown("### AI Response")
+            st.write(answer)
+
         actual_label = int(school_one_year["high_strain"].values[0])
 
         st.subheader("Risk Assessment")
@@ -279,7 +555,7 @@ with tab2:
         colA, colB = st.columns(2)
 
         with colA:
-            st.metric("Predicted Risk Probability", f"{predicted_prob:.2%}")
+            st.metric("Predicted Probability of Strain", f"{predicted_prob:.2%}")
 
         with colB:
             if predicted_label == 1:
@@ -304,29 +580,29 @@ with tab2:
         st.subheader("Multi-Year School Snapshot")
         st.dataframe(school_all_years.sort_values("SURVYEAR"))
 
-        # Sort properly
         school_trend = school_all_years.sort_values("SURVYEAR")
+
         X_trend = school_trend[feature_list]
         y_probs = model.predict_proba(X_trend)[:, 1]
 
-        years = school_trend["SURVYEAR"].values
+        years_arr = school_trend["SURVYEAR"].values
 
         # ===============================
-        # MULTI-YEAR RISK ASSESSMENT
+        # MULTI-YEAR METRICS
         # ===============================
-
         latest_prob = y_probs[-1]
+
         peak_index = np.argmax(y_probs)
-        peak_year = years[peak_index]
+        peak_year = years_arr[peak_index]
         peak_prob = y_probs[peak_index]
+
         avg_prob = np.mean(y_probs)
 
-        threshold = 0.25
-        years_above = np.sum(y_probs > threshold)
+        risk_growth = ((y_probs[-1] - y_probs[0]) / y_probs[0]) * 100
 
         st.subheader("Multi-Year Risk Assessment")
 
-        colA, colB, colC = st.columns(3)
+        colA, colB, colC, colD = st.columns(4)
 
         with colA:
             st.metric("Latest Year Risk", f"{latest_prob:.2%}")
@@ -337,224 +613,197 @@ with tab2:
         with colC:
             st.metric("Average Multi-Year Risk", f"{avg_prob:.2%}")
 
-        if years_above == len(y_probs):
-            st.warning("⚠️ Above threshold in every observed year.")
-        elif years_above == 0:
-            st.success("Below threshold in all observed years.")
-        else:
-            st.info("Mixed performance across years.")
+        with colD:
+            st.metric("Risk Growth Since Start", f"{risk_growth:.1f}%")
+
+        st.info("Risk probabilities vary across observed years.")
 
         # ===============================
-        # TRAJECTORY CHART (Controlled Size)
+        # CHART + EXECUTIVE SUMMARY
         # ===============================
+        col_chart, col_summary = st.columns([1.2, 1])
 
-        st.subheader("Predicted Risk Trajectory")
+        # -------- Chart --------
+        with col_chart:
 
-        fig_trend, ax_trend = plt.subplots(figsize=(4, 2.5), dpi=100)
+            st.subheader("Predicted Risk Trajectory")
 
-        ax_trend.plot(years, y_probs, marker="o")
-        ax_trend.axhline(threshold, linestyle="--")
+            fig_trend, ax_trend = plt.subplots(figsize=(4, 2.5), dpi=100)
 
-        ax_trend.set_xlabel("Year", fontsize=8)
-        ax_trend.set_ylabel("Predicted Risk", fontsize=8)
-        ax_trend.tick_params(labelsize=8)
+            ax_trend.plot(years_arr, y_probs, marker="o")
 
-        plt.tight_layout()
+            ax_trend.set_xlabel("Year", fontsize=8)
+            ax_trend.set_ylabel("Probability of Strain", fontsize=8)
 
-        # IMPORTANT: prevent Streamlit stretching
-        st.pyplot(fig_trend, use_container_width=False)
+            ax_trend.tick_params(labelsize=8)
 
-        st.markdown(
-            """
-            Shows predicted strain probability over time.
-            Dashed line represents the 25% classification threshold.
-            """
-        )
+            plt.tight_layout()
 
-        # ===============================
-        # AUTOMATED TREND REPORT
-        # ===============================
+            st.pyplot(fig_trend, use_container_width=False)
 
-        first_year = years[0]
-        last_year = years[-1]
+            st.caption(
+                "Chart shows the model-estimated probability of structural strain over time."
+            )
 
-        first_prob = y_probs[0]
-        last_prob = y_probs[-1]
+        # -------- Executive Summary --------
+        with col_summary:
 
-        peak_index = np.argmax(y_probs)
-        peak_year = years[peak_index]
-        peak_value = y_probs[peak_index]
+            st.subheader("Executive Trend Assessment")
 
-        overall_change = last_prob - first_prob
+            first_year = years_arr[0]
+            last_year = years_arr[-1]
 
-        # Determine direction
-        if overall_change > 0.05:
-            trend_direction = "Overall worsening trend."
-        elif overall_change < -0.05:
-            trend_direction = "Overall improving trend."
-        else:
-            trend_direction = "Overall relatively stable trend."
+            first_prob = y_probs[0]
+            last_prob = y_probs[-1]
 
-        # Structural persistence
-        if years_above == len(y_probs):
-            structural_status = "Above threshold every observed year."
-        else:
-            structural_status = "Not consistently above threshold."
+            peak_index = np.argmax(y_probs)
+            peak_year = years_arr[peak_index]
+            peak_value = y_probs[peak_index]
 
-        st.markdown("### 📊 Executive Trend Assessment")
+            overall_change = last_prob - first_prob
 
-        st.markdown(f"""
-        **This school is:**
+            if overall_change > 0.05:
+                trend_direction = "Overall worsening trend."
+            elif overall_change < -0.05:
+                trend_direction = "Overall improving trend."
+            else:
+                trend_direction = "Overall relatively stable trend."
 
-        - {structural_status}
-        - Peak risk occurred in **{peak_year}** at **{peak_value:.2%}**
-        - Risk changed from **{first_prob:.2%}** in {first_year}  
-        to **{last_prob:.2%}** in {last_year}
+            structural_status = (
+                "Probability of strain remains elevated across observed years."
+            )
 
-        ---
 
-        **Overall Pattern:**
+        # -----------------------------------------------------
+        # RISK INTERPRETATION LEVEL
+        # -----------------------------------------------------
 
-        {trend_direction}
+        with col_summary:
 
-        Even at **{last_prob:.2%}**, this school remains  
-        **{last_prob/threshold:.1f}× above the 25% threshold**,  
-        indicating continued structural strain risk.
-        """)
+                # interpretation logic
+            if last_prob < 0.10:
+                interpretation = "low predicted strain risk"
+            elif last_prob < 0.25:
+                interpretation = "mild strain risk"
+            elif last_prob < 0.50:
+                interpretation = "moderate strain risk"
+            elif last_prob < 0.75:
+                interpretation = "high strain risk"
+            else:
+                interpretation = "severe strain risk"
+
+            st.markdown(f"""
+            **This school is:**
+
+            • {structural_status}
+
+            • Peak risk occurred in **{peak_year}** at **{peak_value:.2%}**
+
+            • Risk changed from **{first_prob:.2%}** in {first_year}
+            to **{last_prob:.2%}** in {last_year}
+
+            **Overall Pattern**
+
+            {trend_direction}
+
+            The most recent model estimate is **{last_prob:.2%}**, indicating **{interpretation}**.
+            """)
+
+            # -----------------------------------------------------
+            # AI POLICY ASSISTANT (MULTI-YEAR ANALYSIS)
+            # -----------------------------------------------------
+
+            st.subheader("AI Policy Assistant (Multi-Year Analysis)")
+
+            multi_year_question = st.text_input(
+                "Ask a question about this school's long-term strain trends:"
+            )
+
+            if st.button("Ask AI About Trends") and multi_year_question:
+
+                trend_prompt = f"""
+                You are an education policy analyst.
+
+                School: {school_all_years.SCH_NAME.iloc[0]}
+
+                Observed years: {years_arr}
+
+                Latest strain probability: {latest_prob:.2%}
+                Average strain probability: {avg_prob:.2%}
+
+                Peak risk year: {peak_year} ({peak_value:.2%})
+
+                Overall trend:
+                {trend_direction}
+
+                User question:
+                {multi_year_question}
+
+                Provide a concise explanation and possible administrative or policy actions.
+                """
+
+                response = client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[{"role": "user", "content": trend_prompt}]
+                )
+
+                trend_answer = response.choices[0].message.content
+
+                st.markdown("### AI Trend Analysis")
+                st.write(trend_answer)
 
     # =====================================================
-    # EXPANDER 1 — HOW TO INTERPRET THE NUMBERS
+    # EXPANDER — HOW TO INTERPRET
     # =====================================================
     with st.expander("📘 How To Interpret These Numbers"):
 
         st.markdown("""
-        ### Understanding the Scale of the Values
+### Understanding the Scale of the Values
 
-        This dataset includes different numeric types:
+Binary Indicators  
+• 1 = Yes  
+• 0 = No  
 
-        #### 1️⃣ Binary Indicators
-        • **1 = Yes / True**  
-        • **0 = No / False**  
-        Example: `high_strain`
+Proportions  
+• Values like 0.05 represent 5%
 
-        #### 2️⃣ Percentage Values (Already in %)
-        Values like **2.2, 24.9, 15.2** represent percentages directly.  
-        Example:  
-        `24.9` = 24.9% of households fall in that income band.
+Percentages  
+• Values like 23 represent 23%
 
-        #### 3️⃣ Proportion Values (0–1 Scale)
-        Values like **0.0506** represent proportions.  
-        Example:  
-        `0.0506` = 5.06% of students.
-
-        ---
-
-        Higher values indicate greater concentration of that
-        demographic or economic characteristic.
-        """)
+Higher values indicate greater concentration of
+that demographic or socioeconomic characteristic.
+""")
 
     # =====================================================
-    # EXPANDER 2 — WHAT EACH COLUMN MEANS
+    # EXPANDER — COLUMN DEFINITIONS
     # =====================================================
     with st.expander("📚 What Each Column Represents"):
 
         st.markdown("""
-        ### Core Identifiers
+NCESSCH — NCES School ID  
+SCH_NAME — School name  
+SURVYEAR — Year of data
 
-        • **NCESSCH** – National Center for Education Statistics school ID  
-        • **SCH_NAME** – School name  
-        • **SURVYEAR** – School year  
+high_strain — 1 = school classified as strained
 
-        ### Strain Indicator
+Income Distribution  
+TH_10_15K — households earning $10–15k  
+TH_15_25K — households earning $15–25k  
+TH_50_75K — households earning $50–75k  
+TH_75_100K — households earning $75–100k  
+TH_100_150K — households earning $100–150k  
+TH_150_200K — households earning $150–200k  
+TH_200K_AND_ABOVE — households above $200k
 
-        • **high_strain** – 1 = School identified as overcrowded / strained  
-          0 = Not identified as strained  
+Demographics  
+prop_BL — % Black students  
+prop_WH — % White students  
+prop_HI — % Hispanic students  
+prop_AS — % Asian students  
+prop_AM — % American Indian students  
+prop_TR — % two or more races
 
-        ### Income Distribution (Household %)
-
-        • **TH_10_15K** – % households earning $10k–$15k  
-        • **TH_15_25K** – % earning $15k–$25k  
-        • **TH_50_75K** – % earning $50k–$75k  
-        • **TH_75_100K** – % earning $75k–$100k  
-        • **TH_100_150K** – % earning $100k–$150k  
-        • **TH_150_200K** – % earning $150k–$200k  
-        • **TH_200K_AND_ABOVE** – % earning over $200k  
-
-        ### Assistance Indicators
-
-        • **TH_WITH_SNAP** – % households receiving SNAP benefits  
-        • **TH_WITH_CASH_ASSIST** – % receiving cash assistance  
-
-        ### Demographic Composition (Student %)
-
-        • **prop_BL** – % Black students  
-        • **prop_WH** – % White students  
-        • **prop_HI** – % Hispanic students  
-        • **prop_AS** – % Asian students  
-        • **prop_AM** – % American Indian students  
-        • **prop_TR** – % Two or more races  
-
-        ### Economic Need
-
-        • **frl_ratio** – % eligible for Free/Reduced Lunch  
-        • **redl_ratio** – Reduced lunch only ratio  
-
-        ---
-
-        These indicators help evaluate socioeconomic concentration,
-        demographic composition, and potential strain drivers.
-        """)
-
-# =========================================================
-# TAB 3 — MODEL EVALUATION
-# =========================================================
-with tab3:
-
-    st.header("Model Evaluation")
-
-    from sklearn.metrics import (
-        roc_curve,
-        precision_recall_curve,
-        roc_auc_score,
-        average_precision_score,
-    )
-
-    X_all = df[feature_list]
-    y_true = df["high_strain"]
-    y_probs = model.predict_proba(X_all)[:, 1]
-
-    # -------- ROC --------
-    st.subheader("ROC Curve")
-
-    fpr, tpr, _ = roc_curve(y_true, y_probs)
-    roc_auc = roc_auc_score(y_true, y_probs)
-
-    fig, ax = plt.subplots(figsize=(5, 3))
-    ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-    ax.plot([0, 1], [0, 1], linestyle="--")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.legend()
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    # -------- PR --------
-    st.subheader("Precision-Recall Curve")
-
-    precision, recall, _ = precision_recall_curve(y_true, y_probs)
-    avg_precision = average_precision_score(y_true, y_probs)
-
-    fig2, ax2 = plt.subplots(figsize=(5, 3))
-    ax2.plot(recall, precision, label=f"AP = {avg_precision:.3f}")
-    ax2.set_xlabel("Recall")
-    ax2.set_ylabel("Precision")
-    ax2.legend()
-    plt.tight_layout()
-    st.pyplot(fig2)
-
-    # -------- Metrics --------
-    colM1, colM2 = st.columns(2)
-    with colM1:
-        st.metric("ROC-AUC", f"{roc_auc:.3f}")
-    with colM2:
-        st.metric("Average Precision", f"{avg_precision:.3f}")
+Economic Need  
+frl_ratio — free/reduced lunch  
+redl_ratio — reduced lunch only
+""")

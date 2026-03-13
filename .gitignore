@@ -6,3 +6,4 @@ src/johnny.ipynb
 .DS_Store
 strain_risk_streamlit/rf_model.pkl
 strain_risk_streamlit/rf_production_dataset.csv
+strain_risk_streamlit/.streamlit/secrets.toml
