@@ -297,7 +297,7 @@ and more proactive resource planning.
 with col1:
     st.markdown("**Model Performance (ROC-AUC Curve)**")
 
-    st.image("ROC AUC.png", use_container_width=True)
+    st.image("strain_risk_streamlit/ROC AUC.png", width="content")
 
     st.markdown("""
     The ROC curve evaluates how well the model distinguishes between schools
@@ -312,7 +312,7 @@ with col1:
 with col2:
     st.markdown("**Precision vs Recall**")
 
-    st.image("Precision Recall.png", use_container_width=True)
+    st.image("strain_risk_streamlit/Precision Recall.png", width="content")
 
     st.markdown("""
     Precision measures how often the model is correct when it predicts a school
@@ -327,8 +327,8 @@ with col2:
 with col3:
     st.markdown("**Top 10 Model Feature Contributions**")
 
-    st.image("top 10 feature importance.png", use_container_width=True)
-
+    st.image("strain_risk_streamlit/top 10 feature importance.png", width="content")
+    
     st.markdown("""
 Feature importance shows which variables contributed most to the model's
 ability to identify schools experiencing structural strain.
